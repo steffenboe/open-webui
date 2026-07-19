@@ -26,7 +26,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 # pydub needs stdlib audioop (gone in 3.13); keep requires-python capped < 3.13
@@ -610,6 +610,83 @@ async def speech(request: Request, user=Depends(get_verified_user)):
         },
     )
     return response
+
+
+@router.post('/speech/stream')
+async def speech_stream(request: Request, user=Depends(get_verified_user)):
+    """Stream TTS audio directly from OpenAI-compatible endpoints for real-time playback."""
+    engine = await Config.get('audio.tts.engine')
+    if engine == '':
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'chat.tts', await Config.get('user.permissions')
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    # Only support OpenAI engine for streaming
+    if engine != 'openai':
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Streaming is only supported for OpenAI TTS engine',
+        )
+
+    try:
+        body = await request.body()
+        payload = json.loads(body)
+    except Exception as exc:
+        log.exception(exc)
+        raise HTTPException(status_code=400, detail='Invalid JSON payload')
+
+    # Prepare OpenAI API request
+    payload['model'] = await Config.get('audio.tts.model')
+    if not payload.get('voice'):
+        payload['voice'] = await Config.get('audio.tts.voice')
+    payload = {**payload, **(await Config.get('audio.tts.openai.params') or {})}
+    
+    api_key = await Config.get('audio.tts.openai.api_key')
+    api_base_url = await Config.get('audio.tts.openai.api_base_url')
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    }
+    if ENABLE_FORWARD_USER_INFO_HEADERS:
+        headers = include_user_info_headers(headers, user)
+
+    async def stream_generator():
+        """Generator that streams audio chunks from OpenAI API."""
+        try:
+            session = await get_session()
+            async with session.post(
+                url=f'{api_base_url}/audio/speech',
+                json=payload,
+                headers=headers,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as response:
+                response.raise_for_status()
+                
+                # Stream chunks as they arrive
+                async for chunk in response.content.iter_chunked(4096):
+                    yield chunk
+        except Exception as exc:
+            log.exception(exc)
+            raise
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type='audio/mpeg',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',  # Disable nginx buffering
+        }
+    )
 
 
 async def _transcribe_whisper(request, file_path, languages, file_dir, id):

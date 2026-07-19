@@ -6,7 +6,8 @@
 
 	import { blobToFile } from '$lib/utils';
 	import { generateEmoji } from '$lib/apis';
-	import { synthesizeOpenAISpeech, transcribeAudio } from '$lib/apis/audio';
+	import { synthesizeOpenAISpeech, streamOpenAISpeech, transcribeAudio } from '$lib/apis/audio';
+	import { StreamingAudioPlayer, streamAudioFromUrl } from '$lib/utils/audio';
 
 	import { toast } from 'svelte-sonner';
 
@@ -335,7 +336,7 @@
 				// Calculate RMS level from time domain data
 				rmsLevel = calculateRMS(timeDomainData);
 
-				if (muted || (assistantSpeaking && !($settings?.voiceInterruption ?? false))) {
+				if (muted || (assistantSpeaking && !($settings?.voiceInterruuption ?? false))) {
 					rmsLevel = 0;
 				}
 
@@ -470,6 +471,12 @@
 			currentUtterance = null;
 		}
 
+		// Stop streaming audio player
+		if (streamingAudioPlayer) {
+			streamingAudioPlayer.stop();
+			streamingAudioPlayer = null;
+		}
+
 		const audioElement = document.getElementById('audioElement');
 		if (audioElement) {
 			audioElement.muted = true;
@@ -479,6 +486,7 @@
 	};
 
 	let audioAbortController = new AbortController();
+	let streamingAudioPlayer: StreamingAudioPlayer | null = null;
 
 	// Audio cache map where key is the content and value is the Audio object.
 	const audioCache = new Map();
@@ -495,7 +503,12 @@
 					}
 				}
 
-				if ($settings.audio?.tts?.engine === 'browser-kokoro') {
+				// Use streaming for OpenAI TTS engine
+				if ($config.audio.tts.engine === 'openai') {
+					// For streaming, we don't cache - we stream directly
+					// Return a marker to indicate streaming should be used
+					return 'streaming';
+				} else if ($settings.audio?.tts?.engine === 'browser-kokoro') {
 					const url = await $TTSWorker
 						.generate({
 							text: content,
@@ -535,14 +548,123 @@
 
 	let messages = {};
 
+	const playStreamingAudio = async (content: string, signal: AbortSignal) => {
+		// Stop any existing streaming player
+		if (streamingAudioPlayer) {
+			streamingAudioPlayer.stop();
+			streamingAudioPlayer = null;
+		}
+
+		const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
+		if (!audioElement) {
+			console.error('Audio element not found');
+			return;
+		}
+
+		try {
+			// Initialize streaming player
+			streamingAudioPlayer = new StreamingAudioPlayer(audioElement);
+			await streamingAudioPlayer.init('audio/mpeg');
+			streamingAudioPlayer.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
+
+			// Set emoji if available
+			if (($settings?.showEmojiInCall ?? false) && emojiCache.has(content)) {
+				emoji = emojiCache.get(content);
+			} else {
+				emoji = null;
+			}
+
+			assistantSpeaking = true;
+
+			// Fetch and stream audio
+			const response = await streamOpenAISpeech(
+				localStorage.token,
+				getVoiceId(),
+				content
+			);
+
+			if (!response) {
+				throw new Error('Failed to get streaming audio response');
+			}
+
+			// Stream the audio data
+			const reader = response.body?.getReader();
+			if (!reader) {
+				throw new Error('Response body is not readable');
+			}
+
+			try {
+				while (!signal.aborted) {
+					const { done, value } = await reader.read();
+
+					if (done) {
+						streamingAudioPlayer?.endOfStream();
+						break;
+					}
+
+					if (value && streamingAudioPlayer) {
+						streamingAudioPlayer.appendChunk(value);
+
+						// Start playing as soon as we have data
+						if (!streamingAudioPlayer.getIsPlaying()) {
+							await streamingAudioPlayer.play().catch(err => {
+								console.log('Autoplay prevented:', err);
+							});
+						}
+					}
+				}
+			} finally {
+				reader.releaseLock();
+			}
+
+			// Wait for audio to finish playing
+			if (!signal.aborted && streamingAudioPlayer) {
+				await new Promise<void>((resolve) => {
+					const checkEnded = () => {
+						if (signal.aborted || audioElement.ended || audioElement.paused) {
+							resolve();
+						} else {
+							setTimeout(checkEnded, 100);
+						}
+					};
+					checkEnded();
+				});
+			}
+		} catch (error) {
+			console.error('Error streaming audio:', error);
+		} finally {
+			assistantSpeaking = false;
+			if (streamingAudioPlayer) {
+				streamingAudioPlayer.stop();
+				streamingAudioPlayer = null;
+			}
+		}
+	};
+
 	const monitorAndPlayAudio = async (id, signal) => {
 		while (!signal.aborted) {
 			if (messages[id] && messages[id].length > 0) {
 				// Retrieve the next content string from the queue
 				const content = messages[id].shift(); // Dequeues the content for playing
 
-				if (audioCache.has(content)) {
-					// If content is available in the cache, play it
+				// Check if we should use streaming (OpenAI engine)
+				if ($config.audio.tts.engine === 'openai') {
+					// Use streaming playback for OpenAI
+					try {
+						console.log(
+							'%c%s',
+							'color: green; font-size: 20px;',
+							`Streaming audio for content: ${content}`
+						);
+						
+						await playStreamingAudio(content, signal);
+						console.log(`Streamed audio for content: ${content}`);
+						await new Promise((resolve) => setTimeout(resolve, 200));
+					} catch (error) {
+						console.error('Error streaming audio:', error);
+					}
+				} else if (audioCache.has(content)) {
+					// If content is available in the cache, play it (non-streaming engines)
 
 					// Set the emoji for the content if available
 					if (($settings?.showEmojiInCall ?? false) && emojiCache.has(content)) {

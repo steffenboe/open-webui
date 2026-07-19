@@ -24,7 +24,8 @@
 		TTSWorker,
 		user
 	} from '$lib/stores';
-	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
+	import { synthesizeOpenAISpeech, streamOpenAISpeech } from '$lib/apis/audio';
+	import { StreamingAudioPlayer } from '$lib/utils/audio';
 	import { imageGenerations } from '$lib/apis/images';
 	import {
 		copyToClipboard as _copyToClipboard,
@@ -326,7 +327,97 @@
 						loadingSpeech = false;
 					}
 				}
+			} else if ($config.audio.tts.engine === 'openai') {
+				// Use streaming for OpenAI TTS
+				const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
+				if (!audioElement) {
+					console.error('Audio element not found');
+					speaking = false;
+					loadingSpeech = false;
+					return;
+				}
+
+				let streamingPlayer: StreamingAudioPlayer | null = null;
+
+				for (const [, sentence] of messageContentParts.entries()) {
+					if (signal.aborted) break;
+
+					try {
+						// Initialize streaming player for each sentence
+						streamingPlayer = new StreamingAudioPlayer(audioElement);
+						await streamingPlayer.init('audio/mpeg');
+						streamingPlayer.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
+
+						// Stream audio from backend
+						const response = await streamOpenAISpeech(
+							localStorage.token,
+							voiceId,
+							sentence
+						);
+
+						if (!response) {
+							throw new Error('Failed to get streaming audio response');
+						}
+
+						const reader = response.body?.getReader();
+						if (!reader) {
+							throw new Error('Response body is not readable');
+						}
+
+						loadingSpeech = false;
+
+						// Stream chunks
+						try {
+							while (!signal.aborted) {
+								const { done, value } = await reader.read();
+								
+								if (done) {
+									streamingPlayer?.endOfStream();
+									break;
+								}
+
+								if (value && streamingPlayer) {
+									streamingPlayer.appendChunk(value);
+									
+									// Start playing immediately
+									if (!streamingPlayer.getIsPlaying()) {
+										await streamingPlayer.play().catch(err => {
+											console.log('Autoplay prevented:', err);
+										});
+									}
+								}
+							}
+						} finally {
+							reader.releaseLock();
+						}
+
+						// Wait for audio to finish before playing next sentence
+						if (!signal.aborted && streamingPlayer) {
+							await new Promise<void>((resolve) => {
+								const checkEnded = () => {
+									if (signal.aborted || audioElement.ended || audioElement.paused) {
+										resolve();
+									} else {
+										setTimeout(checkEnded, 100);
+									}
+								};
+								checkEnded();
+							});
+						}
+					} catch (error) {
+						console.error('Error streaming audio:', error);
+						toast.error(`${error}`);
+						speaking = false;
+						loadingSpeech = false;
+					} finally {
+						if (streamingPlayer) {
+							streamingPlayer.stop();
+							streamingPlayer = null;
+						}
+					}
+				}
 			} else {
+				// Non-streaming fallback for other engines
 				for (const [, sentence] of messageContentParts.entries()) {
 					if (signal.aborted) return;
 

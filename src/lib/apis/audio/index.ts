@@ -135,6 +135,47 @@ export const synthesizeOpenAISpeech = async (
 	return res;
 };
 
+/**
+ * Stream OpenAI TTS audio for real-time playback
+ * Returns a Response object with a ReadableStream for chunked audio data
+ */
+export const streamOpenAISpeech = async (
+	token: string = '',
+	speaker: string = 'alloy',
+	text: string = '',
+	model?: string
+) => {
+	let error = null;
+
+	const res = await fetch(`${AUDIO_API_BASE_URL}/speech/stream`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify({
+			input: text,
+			voice: speaker,
+			...(model && { model })
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res;
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 interface AvailableModelsResponse {
 	models: { name: string; id: string }[] | { id: string }[];
 }
