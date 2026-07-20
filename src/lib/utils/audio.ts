@@ -110,12 +110,16 @@ export class StreamingAudioPlayer {
 	async init(mimeType: string = 'audio/mpeg'): Promise<void> {
 		this.mimeType = mimeType;
 		
+		console.log('Initializing MediaSource with mimeType:', mimeType);
+
 		if (!MediaSource.isTypeSupported(mimeType)) {
+			console.error('MediaSource does not support', mimeType);
 			throw new Error(`MediaSource does not support ${mimeType}`);
 		}
 
 		this.mediaSource = new MediaSource();
 		this.audio.src = URL.createObjectURL(this.mediaSource);
+		console.log('MediaSource created and attached to audio element');
 
 		return new Promise((resolve, reject) => {
 			if (!this.mediaSource) {
@@ -124,19 +128,29 @@ export class StreamingAudioPlayer {
 			}
 
 			this.mediaSource.addEventListener('sourceopen', () => {
+				console.log('MediaSource sourceopen event fired');
 				try {
 					this.sourceBuffer = this.mediaSource!.addSourceBuffer(mimeType);
+					console.log('SourceBuffer created');
+					
 					this.sourceBuffer.addEventListener('updateend', () => {
 						this.isAppending = false;
 						this.processQueue();
 					});
+					
+					this.sourceBuffer.addEventListener('error', (error) => {
+						console.error('SourceBuffer error:', error);
+					});
+					
 					resolve();
 				} catch (error) {
+					console.error('Error creating SourceBuffer:', error);
 					reject(error);
 				}
 			});
 
 			this.mediaSource.addEventListener('sourceerror', (error) => {
+				console.error('MediaSource error:', error);
 				reject(error);
 			});
 		});
@@ -146,6 +160,7 @@ export class StreamingAudioPlayer {
 	 * Append audio chunk to the buffer
 	 */
 	appendChunk(chunk: Uint8Array): void {
+		console.log('Appending chunk, size:', chunk.length, 'bytes');
 		this.queue.push(chunk);
 		this.processQueue();
 	}
@@ -155,6 +170,9 @@ export class StreamingAudioPlayer {
 	 */
 	private processQueue(): void {
 		if (this.isAppending || !this.sourceBuffer || this.queue.length === 0) {
+			if (this.queue.length > 0) {
+				console.log('Queue has', this.queue.length, 'chunks waiting, isAppending:', this.isAppending);
+			}
 			return;
 		}
 
@@ -164,6 +182,7 @@ export class StreamingAudioPlayer {
 		try {
 			// Convert Uint8Array to ArrayBuffer for SourceBuffer compatibility
 			const arrayBuffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer;
+			console.log('Processing chunk, buffer size:', arrayBuffer.byteLength, 'bytes');
 			this.sourceBuffer.appendBuffer(arrayBuffer);
 		} catch (error) {
 			console.error('Error appending buffer:', error);

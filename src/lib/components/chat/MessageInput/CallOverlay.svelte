@@ -549,8 +549,11 @@
 	let messages = {};
 
 	const playStreamingAudio = async (content: string, signal: AbortSignal) => {
+		console.log('playStreamingAudio called with content:', content.substring(0, 50) + '...');
+		
 		// Stop any existing streaming player
 		if (streamingAudioPlayer) {
+			console.log('Stopping existing streaming player');
 			streamingAudioPlayer.stop();
 			streamingAudioPlayer = null;
 		}
@@ -561,11 +564,18 @@
 			return;
 		}
 
+		console.log('Audio element found, initializing streaming player');
+
 		try {
 			// Initialize streaming player
 			streamingAudioPlayer = new StreamingAudioPlayer(audioElement);
+			
+			// Mute initially to bypass autoplay restrictions
+			audioElement.muted = true;
+			
 			await streamingAudioPlayer.init('audio/mpeg');
 			streamingAudioPlayer.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
+			console.log('Streaming player initialized');
 
 			// Set emoji if available
 			if (($settings?.showEmojiInCall ?? false) && emojiCache.has(content)) {
@@ -575,6 +585,7 @@
 			}
 
 			assistantSpeaking = true;
+			console.log('Fetching streaming audio from backend...');
 
 			// Fetch and stream audio
 			const response = await streamOpenAISpeech(
@@ -587,6 +598,8 @@
 				throw new Error('Failed to get streaming audio response');
 			}
 
+			console.log('Got response, starting to read stream...');
+
 			// Stream the audio data
 			const reader = response.body?.getReader();
 			if (!reader) {
@@ -594,21 +607,29 @@
 			}
 
 			try {
+				let chunkCount = 0;
 				while (!signal.aborted) {
 					const { done, value } = await reader.read();
-
+					
 					if (done) {
+						console.log(`Stream complete, received ${chunkCount} chunks`);
 						streamingAudioPlayer?.endOfStream();
 						break;
 					}
 
 					if (value && streamingAudioPlayer) {
+						chunkCount++;
 						streamingAudioPlayer.appendChunk(value);
-
+						
 						// Start playing as soon as we have data
 						if (!streamingAudioPlayer.getIsPlaying()) {
-							await streamingAudioPlayer.play().catch(err => {
-								console.log('Autoplay prevented:', err);
+							console.log('Starting playback (muted)...');
+							await streamingAudioPlayer.play().then(() => {
+								// Unmute after successful playback start
+								console.log('Playback started, unmuting...');
+								audioElement.muted = false;
+							}).catch(err => {
+								console.error('Autoplay prevented:', err);
 							});
 						}
 					}
@@ -622,7 +643,7 @@
 				await new Promise<void>((resolve) => {
 					const checkEnded = () => {
 						if (signal.aborted || audioElement.ended || audioElement.paused) {
-							resolve();
+							console.log('Audio playback finished');
 						} else {
 							setTimeout(checkEnded, 100);
 						}
