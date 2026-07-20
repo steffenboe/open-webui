@@ -194,20 +194,33 @@ export class StreamingAudioPlayer {
 	 */
 	endOfStream(): void {
 		if (this.mediaSource && this.mediaSource.readyState === 'open') {
-			// Process any remaining chunks
-			if (this.queue.length > 0 && this.sourceBuffer) {
-				const processRemaining = () => {
-					if (this.queue.length === 0 || !this.sourceBuffer) {
+			// Wait for any pending updates and queue to be processed
+			const tryEndOfStream = () => {
+				if (!this.sourceBuffer) {
+					try {
 						this.mediaSource!.endOfStream();
-						return;
+					} catch (error) {
+						console.error('Error ending stream:', error);
 					}
-					this.processQueue();
-					setTimeout(processRemaining, 100);
-				};
-				processRemaining();
-			} else {
-				this.mediaSource.endOfStream();
-			}
+					return;
+				}
+
+				// If SourceBuffer is updating, wait for it to finish
+				if (this.sourceBuffer.updating || this.isAppending || this.queue.length > 0) {
+					setTimeout(tryEndOfStream, 50);
+					return;
+				}
+
+				// Safe to end stream now
+				try {
+					this.mediaSource!.endOfStream();
+				} catch (error) {
+					console.error('Error ending stream:', error);
+				}
+			};
+
+			// Start the process
+			tryEndOfStream();
 		}
 	}
 
@@ -218,18 +231,34 @@ export class StreamingAudioPlayer {
 		this.pause();
 		this.audio.currentTime = 0;
 		this.queue = [];
-		this.isAppending = false;
 		this.isPlaying = false;
 
 		if (this.mediaSource) {
 			try {
 				if (this.mediaSource.readyState === 'open') {
-					this.mediaSource.endOfStream();
+					// Wait for SourceBuffer to finish updating before ending stream
+					const safeEndOfStream = () => {
+						if (this.sourceBuffer && this.sourceBuffer.updating) {
+							setTimeout(safeEndOfStream, 50);
+							return;
+						}
+						try {
+							if (this.mediaSource && this.mediaSource.readyState === 'open') {
+								this.mediaSource.endOfStream();
+							}
+						} catch (error) {
+							// Ignore errors during cleanup
+						}
+					};
+					safeEndOfStream();
 				}
 			} catch (error) {
 				// Ignore errors during cleanup
 			}
 		}
+
+		// Reset appending flag after cleanup
+		this.isAppending = false;
 
 		this.audio.removeAttribute('src');
 		this.audio.load();
