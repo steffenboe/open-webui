@@ -644,6 +644,7 @@
 					const checkEnded = () => {
 						if (signal.aborted || audioElement.ended || audioElement.paused) {
 							console.log('Audio playback finished');
+							resolve();
 						} else {
 							setTimeout(checkEnded, 100);
 						}
