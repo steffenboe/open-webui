@@ -1258,27 +1258,33 @@
 			getOutputText(message?.output) || removeAllDetails(message?.content ?? ''),
 			$config?.audio?.tts?.split_on ?? 'punctuation'
 		);
-		if (!final) {
-			messageContentParts.pop();
-		}
 
-		const nextContentPart = messageContentParts.at(-1) ?? '';
-		if (!nextContentPart || (!final && nextContentPart === message.lastSentence)) {
+		const completedParts = final ? messageContentParts : messageContentParts.slice(0, -1);
+		if (!completedParts.length) {
 			return;
 		}
 
-		if (!final) {
-			message.lastSentence = nextContentPart;
+		const lastDispatchedIndex = Number.isInteger(message.lastSentenceIndex)
+			? message.lastSentenceIndex
+			: -1;
+
+		for (let idx = lastDispatchedIndex + 1; idx < completedParts.length; idx++) {
+			const nextContentPart = completedParts[idx] ?? '';
+			if (!nextContentPart) {
+				continue;
+			}
+
+			eventTarget.dispatchEvent(
+				new CustomEvent('chat', {
+					detail: {
+						id: message.id,
+						content: nextContentPart
+					}
+				})
+			);
 		}
 
-		eventTarget.dispatchEvent(
-			new CustomEvent('chat', {
-				detail: {
-					id: message.id,
-					content: nextContentPart
-				}
-			})
-		);
+		message.lastSentenceIndex = completedParts.length - 1;
 	};
 
 	const getContents = () => {

@@ -641,15 +641,25 @@
 			// Wait for audio to finish playing
 			if (!signal.aborted && streamingAudioPlayer) {
 				await new Promise<void>((resolve) => {
-					const checkEnded = () => {
-						if (signal.aborted || audioElement.ended || audioElement.paused) {
-							console.log('Audio playback finished');
-							resolve();
-						} else {
-							setTimeout(checkEnded, 100);
-						}
+					const onAbort = () => {
+						audioElement.removeEventListener('ended', onEnded);
+						console.log('Audio playback aborted');
+						resolve();
 					};
-					checkEnded();
+
+					const onEnded = () => {
+						signal.removeEventListener('abort', onAbort);
+						console.log('Audio playback finished');
+						resolve();
+					};
+
+					if (signal.aborted) {
+						resolve();
+						return;
+					}
+
+					signal.addEventListener('abort', onAbort, { once: true });
+					audioElement.addEventListener('ended', onEnded, { once: true });
 				});
 			}
 		} catch (error) {
