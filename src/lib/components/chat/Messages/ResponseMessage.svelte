@@ -24,7 +24,6 @@
 		user
 	} from '$lib/stores';
 	import { synthesizeOpenAISpeech, streamOpenAISpeech } from '$lib/apis/audio';
-	import { StreamingAudioPlayer } from '$lib/utils/audio';
 	import { imageGenerations } from '$lib/apis/images';
 	import {
 		copyToClipboard as _copyToClipboard,
@@ -332,92 +331,69 @@
 					}
 				}
 			} else if ($config.audio.tts.engine === 'openai') {
-				// Use streaming for OpenAI TTS
-				const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
-				if (!audioElement) {
-					console.error('Audio element not found');
-					speaking = false;
-					loadingSpeech = false;
-					return;
-				}
+				// Prefetch OpenAI TTS sentences concurrently (ordered enqueue)
+				// so generation/download overlaps current playback.
+				const maxConcurrentRequests = 2;
+				const inFlight = new Map<number, Promise<string>>();
+				const ready = new Map<number, string>();
+				let requestIndex = 0;
+				let enqueueIndex = 0;
+				let producerDone = false;
 
-				let streamingPlayer: StreamingAudioPlayer | null = null;
-
-				for (const [, sentence] of messageContentParts.entries()) {
-					if (signal.aborted) break;
-
-					try {
-						// Initialize streaming player for each sentence
-						streamingPlayer = new StreamingAudioPlayer(audioElement);
-						await streamingPlayer.init('audio/mpeg');
-						streamingPlayer.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
-
-						// Stream audio from backend
-						const response = await streamOpenAISpeech(
-							localStorage.token,
-							voiceId,
-							sentence
-						);
-
+				const spawnRequest = (idx: number, sentence: string) => {
+					const p = (async () => {
+						const response = await streamOpenAISpeech(localStorage.token, voiceId, sentence);
 						if (!response) {
 							throw new Error('Failed to get streaming audio response');
 						}
 
-						const reader = response.body?.getReader();
-						if (!reader) {
-							throw new Error('Response body is not readable');
+						const blob = await response.blob();
+						const url = URL.createObjectURL(blob);
+						ready.set(idx, url);
+						return url;
+					})();
+
+					inFlight.set(idx, p);
+					p.finally(() => inFlight.delete(idx));
+				};
+
+				(async () => {
+					for (const sentence of messageContentParts) {
+						if (signal.aborted) break;
+
+						while (inFlight.size >= maxConcurrentRequests && !signal.aborted) {
+							await Promise.race(inFlight.values()).catch(() => {});
 						}
 
-						loadingSpeech = false;
+						spawnRequest(requestIndex++, sentence);
+					}
 
-						// Stream chunks
-						try {
-							while (!signal.aborted) {
-								const { done, value } = await reader.read();
-								
-								if (done) {
-									streamingPlayer?.endOfStream();
-									break;
-								}
+					producerDone = true;
+				})();
 
-								if (value && streamingPlayer) {
-									streamingPlayer.appendChunk(value);
-									
-									// Start playing immediately
-									if (!streamingPlayer.getIsPlaying()) {
-										await streamingPlayer.play().catch(err => {
-											console.log('Autoplay prevented:', err);
-										});
-									}
-								}
-							}
-						} finally {
-							reader.releaseLock();
+				while (!signal.aborted && (!producerDone || inFlight.size > 0 || ready.size > 0)) {
+					if (ready.has(enqueueIndex)) {
+						const url = ready.get(enqueueIndex)!;
+						ready.delete(enqueueIndex);
+
+						if (speaking) {
+							$audioQueue.enqueue(url);
+							loadingSpeech = false;
 						}
 
-						// Wait for audio to finish before playing next sentence
-						if (!signal.aborted && streamingPlayer) {
-							await new Promise<void>((resolve) => {
-								const checkEnded = () => {
-									if (signal.aborted || audioElement.ended || audioElement.paused) {
-										resolve();
-									} else {
-										setTimeout(checkEnded, 100);
-									}
-								};
-								checkEnded();
-							});
-						}
-					} catch (error) {
-						console.error('Error streaming audio:', error);
-						toast.error(`${error}`);
-						speaking = false;
-						loadingSpeech = false;
-					} finally {
-						if (streamingPlayer) {
-							streamingPlayer.stop();
-							streamingPlayer = null;
-						}
+						enqueueIndex += 1;
+						continue;
+					}
+
+					if (inFlight.size > 0) {
+						await Promise.race(inFlight.values()).catch((error) => {
+							console.error('Error streaming audio:', error);
+							toast.error(`${error}`);
+							speaking = false;
+							loadingSpeech = false;
+						});
+					} else {
+						await new Promise((resolve) => setTimeout(resolve, 10));
 					}
 				}
 			} else {

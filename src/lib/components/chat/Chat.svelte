@@ -55,6 +55,7 @@
 	import {
 		convertMessagesToHistory,
 		copyToClipboard,
+		extractSentences,
 		getMessageContentParts,
 		createMessagesList,
 		sanitizeHistory,
@@ -1608,10 +1609,13 @@
 			return;
 		}
 
-		const messageContentParts = getMessageContentParts(
-			getOutputText(message?.output) || removeAllDetails(message?.content ?? ''),
-			$config?.audio?.tts?.split_on ?? 'punctuation'
-		);
+		const splitOn = $config?.audio?.tts?.split_on ?? 'punctuation';
+		const visibleContent = getOutputText(message?.output) || removeAllDetails(message?.content ?? '');
+
+		const messageContentParts =
+			splitOn === 'punctuation'
+				? extractSentences(visibleContent)
+				: getMessageContentParts(visibleContent, splitOn);
 
 		const completedParts = final ? messageContentParts : messageContentParts.slice(0, -1);
 		if (!completedParts.length) {
